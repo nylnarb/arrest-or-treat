@@ -1,435 +1,126 @@
-# Drug Policy Criminalization — Experiment Guide
+# Arrest or Treat? Measuring How US States Respond to Drug Use
 
-## What This Project Is
+**Which US states arrest people for drug use, and which states treat them? And what explains the difference?**
 
-This project asks: **which US states treat drug use as a criminal problem vs. a public health problem, and what explains the difference?**
+I built a **Criminalization Index** for 49 states over 2015–2022 by joining 7 federal data sources. Then I trained ML models to explain why some states lean much harder on arrests than others. Idaho's average index is about **50× higher** than Massachusetts' or Connecticut's.
 
-It measures that by computing a **Criminalization Index** for each state, each year from 2015–2022:
-
-```
-Criminalization Index = drug arrest rate per 100k / drug treatment admission rate per 100k
-```
-
-- Index **above 1.0** → state arrests more people than it treats (criminalization-oriented)
-- Index **below 1.0** → state treats more people than it arrests (treatment-oriented)
-- National median: **0.996** (nearly balanced)
-- Most criminalizing state: **Idaho** (average index 6.66)
-- Most treatment-oriented: **Connecticut** (average index 0.13)
-
-Machine learning models are then trained on demographic, political, and structural features to explain why some states score 50× higher than others.
+![SHAP beeswarm](outputs/shap_beeswarm.png)
 
 ---
 
-## Architecture Overview
+## Key Findings
 
-Data flows in one direction — raw sources → merged dataset → model → outputs:
+- **Idaho is the outlier.** Its average index is 6.66, meaning it made about 6.7 drug arrests for every treatment admission. Massachusetts, Connecticut and Vermont are near 0.13, or about 1 arrest per 8 admissions.
+- **Politics and incarceration predict it best.** The strongest single predictor is the interaction between Republican presidential vote share and incarceration rate. Region comes next: Northeast and Midwest states score lower.
+- **Legal recreational marijuana goes with less criminalization.** In the OLS model the coefficient is −0.42 (p < 0.01).
+- **Overdose deaths and poverty don't push states toward arrests.** States with more of either score lower once the other factors are controlled for.
+- **Drug arrests fell 43% nationally from 2015 to 2022** (402 → 228 per 100k). Treatment admissions fell less, by 33%.
 
-```
-External APIs / CSVs
-        ↓
-  [fetch_*.py / parse_*.py]   pull and clean each data source independently
-        ↓
-  [02_data_processing.py]     merge everything; compute Criminalization Index
-        ↓
-  data/processed/panel_dataset.csv   ← single file everything downstream reads
-        ↓
-  [03_eda.py]                 explore and summarize
-  [04_modeling.py]            train and evaluate models
-  [05_visualizations.py]      produce final charts
-        ↓
-  outputs/                    HTML charts, PNGs, text summaries
-```
+## Results
 
-There is no database, no web server, no live pipeline. Everything runs locally as Python scripts. The notebook re-implements the same pipeline interactively so you can tweak settings and re-run.
-
----
-
-## File and Module Responsibilities
-
-### Data Fetching / Parsing (run once to build raw data)
-
-These only need to run if the raw CSVs in `data/raw/` are missing or you want to refresh data.
-
-| File | What it does | Output |
-|---|---|---|
-| `src/fetch_acs.py` | Calls Census Bureau API; downloads population, poverty, race, income for all states 2015–2022 | `data/raw/acs/acs_2015_2022_combined.csv` |
-| `src/fetch_nibrs.py` | Calls FBI Crime Data Explorer API; downloads drug arrest counts per state per year | `data/raw/nibrs/nibrs_2015_2022_combined.csv` |
-| `src/fetch_cdc_overdose.py` | Calls CDC API; downloads drug overdose death counts | `data/raw/cdc/cdc_overdose_2015_2022.csv` |
-| `src/fetch_legislature.py` | Builds state legislature partisan seat percentages | `data/raw/policy/legislature_control.csv` |
-| `src/fetch_policy_features.py` | Creates flags for recreational marijuana legalization and governor party | `data/raw/policy/` |
-| `src/fetch_political_features.py` | Computes presidential vote share and governor party streak per state-year | `data/raw/policy/political_features.csv` |
-| `src/parse_nibrs.py` | Parses raw FBI arrest files (fixed-width text 2015–2019, Excel 2020–2022) | same as fetch_nibrs output |
-| `src/parse_teds.py` | Parses the SAMHSA TEDS-A admissions dataset (~14M rows, 2006–2023). Outputs admission counts plus 8 treatment system rate variables per state-year: CJ referral %, MAT adoption %, opioid/meth case mix, dual diagnosis %, same-day access %, residential %, repeat treatment % | `data/raw/teds/teds_2015_2022_combined.csv` |
-| `src/parse_nsumhss.py` | Parses N-SSATS facility surveys (2015–2020) and N-SUMHSS (2021–2022). Aggregates to state-year: facilities per 100k, beds per 100k, ownership mix (public/nonprofit/for-profit), Medicaid acceptance %, capacity utilization | `data/raw/nsumhss/nsumhss_2015_2022.csv` |
-| `src/parse_bjs.py` | Parses Vera Institute / BJS incarceration data | `data/raw/bjs/bjs_incarceration_2015_2022.csv` |
-| `src/parse_lee.py` | Parses FBI law enforcement employees (police per capita) — **not used in final model** | `data/raw/lee/lee_state_2015_2022.csv` |
-
-### Core Pipeline Scripts
-
-| File | What it does |
-|---|---|
-| `src/02_data_processing.py` | **Most important.** Merges all sources, removes bad data (Florida 2017–2021, Oregon), computes the Criminalization Index, writes `panel_dataset.csv`. Requires all original raw source files to be present. |
-| `src/02b_augment_panel.py` | **Use this instead of `02_data_processing.py` when raw source files are unavailable.** Loads the existing `panel_dataset.csv` as a base and merges in new TEDS-A and N-SUMHSS columns without requiring NIBRS, ACS, BJS, or other original sources. Run order: `parse_teds.py` → `parse_nsumhss.py` → `02b_augment_panel.py` |
-| `src/03_eda.py` | Loads panel dataset, produces exploratory charts and `eda_summary.txt` |
-| `src/04_modeling.py` | Trains 5 models with cross-validation, runs hyperparameter tuning, writes `model_results.txt` |
-| `src/05_visualizations.py` | Produces 5 final polished Plotly charts |
-| `src/01_data_acquisition.py` | Empty stub — not implemented |
-
-### Key Data File
-
-`data/processed/panel_dataset.csv` — **392 rows** (state-year observations), **49 states** (Oregon excluded), **2015–2022**, **41 columns**. Includes original arrest/treatment/demographic/policy variables plus 8 TEDS-A treatment system variables and 6 N-SSATS/N-SUMHSS facility supply variables. Every downstream script reads only this file. Never edit it by hand — regenerate with `02_data_processing.py` (if all raw sources are available) or `02b_augment_panel.py` (if only the base panel is available).
-
----
-
-## Data Flow
-
-Here is how one data point — Idaho's 2019 Criminalization Index of 14.1 — gets created:
-
-1. **`parse_nibrs.py`** reads the FBI Annual Summary Report for 2019, sums Idaho drug arrest counts across all age groups → ~7,000 arrests
-2. **`parse_teds.py`** reads the SAMHSA file, counts Idaho 2019 rows with drug admissions → ~500 admissions
-3. **`fetch_acs.py`** fetches Idaho 2019 population from Census API → ~1.8M
-4. **`02_data_processing.py`** merges and computes:
-   - `arrest_rate = 7000 / 1,800,000 × 100,000 = ~389 per 100k`
-   - `treatment_rate = 500 / 1,800,000 × 100,000 = ~28 per 100k`
-   - `criminalization_index = 389 / 28 = ~14.1`
-5. That row, combined with Idaho's demographic and political features, becomes one row in `panel_dataset.csv`
-6. `04_modeling.py` reads all 377 rows and learns which features explain why Idaho's index is 50× higher than Connecticut's
-
-### Why certain states are excluded
-
-| Excluded | Reason | Where handled |
-|---|---|---|
-| Florida 2017–2021 | FBI stopped receiving Florida's NIBRS data — arrest numbers are artificially low | `02_data_processing.py` lines ~55–65 |
-| Oregon (all years) | Oregon decriminalized drugs in 2020 and stopped reporting to federal treatment database — treatment rate is artificially low | `02_data_processing.py` lines ~70–75 |
-| Idaho 2022, Illinois 2020–2021 | NIBRS transition artifacts — filtered in EDA and visualizations | `03_eda.py` lines ~25–30 |
-
----
-
-## Current Results
-
-### Model performance (5-fold cross-validated R²)
-
-R² measures how much of the variation in state scores the model explains. 1.0 = perfect, 0.0 = no better than guessing the average.
+5-fold cross-validated performance on 377 clean state-year observations (target: log of the index):
 
 | Model | R² | MAE | RMSE |
 |---|---|---|---|
-| OLS (linear regression) | 0.41 | — | — |
-| Random Forest | 0.62 | — | — |
-| Extra Trees | 0.65 | — | — |
-| XGBoost | 0.65 | — | — |
-| Gradient Boosting | **0.66** | 0.385 | 0.636 |
-| Tuned XGBoost | **0.68** | — | — |
+| OLS Linear Regression | 0.41 | 0.580 | 0.839 |
+| Random Forest | 0.62 | 0.443 | 0.678 |
+| Extra Trees | 0.64 | 0.420 | 0.655 |
+| XGBoost | 0.65 | 0.391 | 0.649 |
+| Gradient Boosting | 0.66 | 0.385 | 0.636 |
+| **XGBoost (tuned, 60-iter random search)** | **0.68** | — | — |
 
-Full metrics are in `outputs/model_results.txt`.
+The tree models beat linear regression by about 25 R² points, which suggests strong non-linear and interaction effects. I kept OLS as the model to interpret, because it has coefficients and p-values, and used SHAP to explain the tree models.
 
-### Top predictors (Gradient Boosting feature importance)
-
-| Feature | Importance | Interpretation |
-|---|---|---|
-| `pres_x_incarceration` | 0.101 | Republican presidential vote × incarceration rate — the strongest combined signal |
-| `region_northeast` | 0.083 | Northeast states score dramatically lower |
-| `pres_vote_rep` | 0.072 | States that vote more Republican have higher indexes |
-| `region_midwest` | 0.071 | Midwest also scores lower than South/Mountain West |
-| `incarc_x_poverty` | 0.070 | Incarceration rate × poverty rate interaction |
-| `incarceration_rate` | 0.067 | Higher incarceration → higher criminalization index |
-| `overdose_death_rate` | 0.054 | Higher overdose deaths → slightly lower index |
-| `marijuana_legal` | 0.044 | Legal recreational MJ → lower index |
-
-### OLS significant coefficients (p < 0.05)
-
-| Feature | Coefficient | Meaning |
-|---|---|---|
-| `incarceration_rate` | +1.43 | More incarcerated people → more criminalization |
-| `pres_vote_rep` | +0.84 | More Republican presidential vote → more criminalization |
-| `marijuana_legal` | −0.42 | Legal marijuana → less criminalization |
-| `overdose_death_rate` | −0.92 | More overdose deaths → less criminalization |
-| `poverty_rate` | −0.84 | More poverty → less criminalization |
+![Feature importance and predicted vs. actual](outputs/fig3_feature_importance.png)
 
 ---
 
-## How to Modify or Improve
+## The Metric
 
-### Improving accuracy
-
-**Add more features** — The model explains 68% of variation; 32% is unexplained. To add a new feature:
-1. Add the column to `data/processed/panel_dataset.csv` by modifying `src/02_data_processing.py`
-2. Add its column name to `EXTENDED_FEATURES` in `src/04_modeling.py` around lines 80–95
-3. Re-run `02_data_processing.py` then `04_modeling.py`
-
-**Add interaction terms** — The existing interactions (`pres_vote_rep × incarceration_rate`) are the top predictors. To add a new one, follow the same pattern in `src/04_modeling.py` around lines 140–160:
-```python
-df['new_interaction'] = df['col_a'] * df['col_b']
+```
+Criminalization Index = drug arrests per 100k ÷ drug treatment admissions per 100k
 ```
 
-**Add state fixed effects** — The current models treat Idaho-2015 and Idaho-2016 as unrelated. Adding a dummy variable for each state would control for unmeasured state-level constants. In `02_data_processing.py`, add:
-```python
-state_dummies = pd.get_dummies(df['state'], prefix='fe', drop_first=True)
-df = pd.concat([df, state_dummies], axis=1)
+- **> 1.0**: more drug arrests than treatment admissions (criminalization-oriented)
+- **< 1.0**: more treatment admissions than arrests (treatment-oriented)
+- The national median is **0.996**, almost exactly balanced. The distribution is heavily right-skewed (max 14.1, Idaho 2019), so I log-transformed the index before modeling.
+
+## Data Sources
+
+| Source | What it provides |
+|---|---|
+| FBI NIBRS / Crime Data Explorer API | Drug arrests by state-year |
+| SAMHSA TEDS-A (about 14M records) | Treatment admissions, criminal-justice referral %, MAT adoption, case mix |
+| SAMHSA N-SSATS / N-SUMHSS | Treatment facilities and beds per capita, ownership mix, Medicaid acceptance |
+| US Census ACS API | Population, poverty, income, unemployment, race/ethnicity |
+| CDC VSRR | Drug overdose death rates |
+| Vera Institute / BJS | Incarceration rates |
+| Election & legislature data | Presidential vote share, governor party, legislative control |
+
+The final panel has **392 state-year rows × 41 columns**, saved in `data/processed/panel_dataset.csv`.
+
+## Data Quality Work
+
+Federal crime data has known reporting gaps. I identified them and excluded the affected years so they wouldn't distort the results:
+
+| Excluded | Why |
+|---|---|
+| Florida 2017–2021 | Florida stopped submitting to NIBRS, so its arrest counts are artificially low |
+| Oregon (all years) | Oregon decriminalized drugs (Measure 110) and its treatment reporting is incomplete |
+| Idaho 2022, Illinois 2020–2021 | Artifacts from the NIBRS transition |
+
+## Pipeline
+
 ```
-Then add the `fe_*` columns to `EXTENDED_FEATURES`.
+Federal APIs / raw files
+        ↓
+  src/fetch_*.py, src/parse_*.py   each source pulled and cleaned on its own
+        ↓
+  src/02_data_processing.py        merge, exclusions, compute the index
+        ↓
+  data/processed/panel_dataset.csv
+        ↓
+  src/03_eda.py → src/04_modeling.py → src/05_visualizations.py
+        ↓
+  outputs/                         interactive Plotly maps, SHAP plots, metrics
+```
 
-**Increase tuning search** — In `src/04_modeling.py` around line 230, `n_iter=60`. Increasing to `150` searches more combinations at the cost of longer runtime (~15–20 min).
+`notebooks/DrugPolicyCriminalization.ipynb` runs the whole analysis interactively. Its toggles cover outlier filtering, feature sets, log transform and tuning.
 
-### Debugging poor performance
+## Tech Stack
 
-1. **Check R² dropped after a data change** — Re-run `03_eda.py` and verify `eda_summary.txt` still shows ~377 clean observations and a mean index near 1.29. If the count dropped or the mean shifted, something was excluded that shouldn't be.
-2. **Check for outlier influence** — Run with `DROP_OUTLIERS = False` in the notebook. If R² changes dramatically, extreme values (Idaho 2019 at 14.1) are distorting the model.
-3. **Check for correlated features** — The heatmap in `outputs/fig_distributions.png` shows feature correlations. Features with correlation >0.9 are redundant. Remove one of any near-identical pair from `EXTENDED_FEATURES`.
-4. **Check the exclusions** — If a state you expect is missing, look in `02_data_processing.py` lines 55–75 (Florida/Oregon exclusion block) and `03_eda.py` lines 25–30 (additional filtering).
+Python · pandas · NumPy · scikit-learn · XGBoost · statsmodels · SHAP · Plotly · matplotlib/seaborn · REST APIs (Census, FBI CDE, CDC Socrata)
 
-### Making changes safely
+## Run It
 
-- **Never edit `panel_dataset.csv` by hand.** Fix the script and regenerate.
-- **Use the notebook for experiments** before committing changes to the `.py` scripts.
-- **The raw CSVs in `data/raw/` are the ground truth.** Don't delete them unless you are prepared to re-run the fetch/parse scripts.
-- **Run `03_eda.py` after any data pipeline change** to sanity-check the observation count and index distribution before re-running the model.
-
----
-
-This guide explains how to run all analysis for the Drug Policy Criminalization project using the consolidated Jupyter notebook.
-
-## Setup
-
-Make sure you have the required packages installed:
 ```bash
+git clone https://github.com/nylnarb/arrest-or-treat.git
+cd arrest-or-treat
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install pandas numpy scikit-learn statsmodels xgboost plotly seaborn matplotlib us shap
+
+python src/03_eda.py
+python src/04_modeling.py
+python src/05_visualizations.py
 ```
 
-Ensure the processed dataset exists at: `./data/processed/panel_dataset.csv`
+The processed dataset is included, so the analysis runs without the raw files. Raw source data isn't included because of its size. See `Criminalization Vs. Treatment.md` for where to get each source.
 
-If not, run the data processing script first:
-```bash
-python src/02_data_processing.py
-```
+## Limitations
 
-If the original raw source files (NIBRS, ACS, BJS, etc.) are not available — which is the case for this repo — run the augment script instead after first running the two parsers:
-```bash
-python src/parse_teds.py        # requires data/raw/teds/tedsa_puf_2006_2023.csv
-python src/parse_nsumhss.py     # requires N-SSATS/N-SUMHSS files in data/raw/
-python src/02b_augment_panel.py # merges new columns into existing panel_dataset.csv
-```
+- **The results are associations, not causal effects.** The models show which state traits go with a high index. They don't show that those traits cause it.
+- The data is a panel of only ~49 states, so state-years from the same state are correlated. Adding state fixed effects or grouped cross-validation is the next step.
+- A low arrest count can mean a state reports poorly to NIBRS rather than enforcing lightly. I handled the known gaps (listed above), but some may remain.
 
-## Data Retrieval
+## Outputs
 
-Raw Data is not included in this repo. Current repo only works with processed data. If user wishes to personalize refer to Criminalization Vs. Treatment.md to find corresponding data.
+The interactive HTML maps and charts are in `outputs/`. Download one and open it in a browser, since GitHub won't render them inline.
 
-## Quick Start
+- `viz1_choropleth_final.html`: the index mapped by state
+- `viz2_time_trends_final.html`: national arrest vs. treatment trends
+- `viz5_state_rankings.html`: state rankings
+- `viz_residuals_choropleth.html`: states that are more or less criminalizing than the model predicts
 
-The notebook is configured with parameters at the top of the configuration cell. Look for these variables:
+---
 
-```python
-DROP_OUTLIERS  = True          # Enable/disable outlier filtering
-FEATURES_SET   = "extended"    # Feature set: "baseline" or "extended"
-LOG_TRANSFORM  = True          # Log-transform the criminalization index
-N_ESTIMATORS   = 400           # Number of trees in RF/GB models
-RUN_TUNING     = True          # Enable/disable hyperparameter search
-BEST_MODEL     = "auto"        # Final model selection
-```
-
-## Part 1: Baseline
-
-Run the notebook with default settings:
-
-1. Set parameters to:
-   - `DROP_OUTLIERS = True`
-   - `FEATURES_SET = "extended"`
-   - `LOG_TRANSFORM = True`
-   - `N_ESTIMATORS = 400`
-   - `RUN_TUNING = False`
-   - `BEST_MODEL = "auto"`
-
-2. Run all cells in order
-
-3. Record:
-   - Model comparison R² table
-   - Training time
-   - Top predictor from feature importance chart
-
-## Part 2: Data Quality Filtering
-
-Test the effect of outlier removal:
-
-1. Change only: `DROP_OUTLIERS = False`
-
-2. Re-run from the filtering cell onward
-
-3. Compare:
-   - Criminalization index distribution
-   - Choropleth map appearance
-   - Model R² with and without outliers
-
-**Why filtering matters:**
-- Idaho 2022 and Florida 2017–2021 have known NIBRS reporting gaps
-- Illinois 2020–2021 shows artifacts from the transition to NIBRS reporting
-- Including these observations inflates variance and biases the index
-
-## Part 3: Exploring EDA
-
-Examine the exploratory visualizations:
-
-1. Keep default settings
-2. Run the EDA cell
-3. Study the correlation heatmap — which demographic features correlate most with the index?
-4. Note: states with high criminalization index vs. treatment orientation
-
-**Questions to consider:**
-- Which regions cluster together on the choropleth?
-- Is the national arrest rate trending up or down?
-- What is the median criminalization index, and how skewed is the distribution?
-
-## Part 4: Feature Engineering
-
-Test different feature sets:
-
-**Baseline features** (7 features — demographics only):
-1. Set `FEATURES_SET = "baseline"`
-2. Run the feature engineering cell
-3. Record: number of features, target mean/std
-
-**Extended features** (41 features — demographics + policy + treatment system + facility supply + interactions):
-1. Set `FEATURES_SET = "extended"`
-2. Run the feature engineering cell
-3. Compare feature counts and model R² in Part 5
-
-**Log transformation:**
-1. Set `LOG_TRANSFORM = False`
-2. Re-run feature engineering and model training
-3. Compare R² — log transform usually helps with the right-skewed index
-
-**Expected observations:**
-- Extended features add significant predictive power
-- Log transform reduces RMSE and improves R² for tree models
-- Political and structural features (incarceration rate, presidential vote) are often top predictors
-
-## Part 5: Model Comparison
-
-Compare five model types:
-
-Suggested `N_ESTIMATORS` values to test:
-- 100 — fast, rough baseline
-- 400 — default, balanced
-- 800 — slower, marginal improvement
-
-For each:
-1. Set `N_ESTIMATORS = 100` (or other value)
-2. Run the model training cell
-3. Record R², MAE, RMSE for all five models and training time
-
-**Expected observations:**
-- Tree models (RF, GB, XGB) outperform OLS significantly
-- Extra Trees and Random Forest perform similarly
-- XGBoost and Gradient Boosting are usually best
-- More estimators help up to a point (~400–600 is usually enough)
-
-## Part 6: Hyperparameter Tuning
-
-Tune the best models from Part 5:
-
-1. Set `RUN_TUNING = True`
-2. Run the tuning cell (takes 5–15 minutes)
-3. Compare tuned R² vs. default R²
-
-**What gets tuned:**
-- XGBoost: n_estimators, max_depth, learning_rate, subsample, colsample_bytree, regularization
-- Gradient Boosting: n_estimators, max_depth, learning_rate, subsample, max_features
-
-**Expected observations:**
-- Tuning typically improves R² by 0.02–0.08
-- Best learning_rate is usually 0.03–0.07
-- Deeper trees (max_depth=5–6) tend to work well for this dataset
-
-## Part 7: Final Model
-
-Combine your best settings from all experiments:
-
-1. Set all parameters to your optimal configuration:
-   - `DROP_OUTLIERS = True` (if it improved results in Part 2)
-   - Best `FEATURES_SET` from Part 4
-   - `LOG_TRANSFORM = True` (if it helped in Part 4)
-   - Best `N_ESTIMATORS` from Part 5
-   - `RUN_TUNING = True` (from Part 6)
-   - `BEST_MODEL = "auto"` (or manually set to the winner)
-
-2. Run all cells
-
-3. Record final configuration and accuracy
-
-Example optimal configuration:
-```python
-DROP_OUTLIERS  = True
-FEATURES_SET   = "extended"
-LOG_TRANSFORM  = True
-N_ESTIMATORS   = 400
-RUN_TUNING     = True
-BEST_MODEL     = "auto"
-```
-
-## Tips for Best Results
-
-1. **Always filter outliers** — Idaho/Florida/Illinois data artifacts inflate variance
-2. **Use the extended feature set** — political and structural variables add real predictive power
-3. **Log-transform the target** — criminalization index is right-skewed; log makes it more normal
-4. **N_ESTIMATORS = 400** balances training time and accuracy
-5. **Tuning helps** — especially for XGBoost; R² can jump by 0.05+
-
-## Output Files
-
-All outputs are saved to the `outputs/` directory:
-
-| File | Description |
-|------|-------------|
-| `fig1_choropleth.html` | EDA choropleth (average index by state) |
-| `fig2_time_trends.html` | EDA time trend (arrest vs treatment rate) |
-| `fig_distributions.png` | Index distribution + correlation heatmap |
-| `viz1_choropleth_final.html` | Final polished choropleth map |
-| `viz2_time_trends_final.html` | Final dual-axis time trend |
-| `viz3_feature_importance.html` | Interactive feature importance chart |
-| `viz4_scatter_final.html` | Top predictor scatter with OLS trendline |
-| `viz5_state_rankings.html` | State rankings bar chart |
-| `fig3_feature_importance.png` | Static feature importance + predicted vs actual |
-| `shap_scatter_poverty.png` | SHAP scatter: poverty effect by political lean |
-| `shap_beeswarm.png` | SHAP beeswarm: all features ranked by directional impact |
-| `residuals_by_state.png` | States over/under-criminalized vs. model predictions |
-| `viz_residuals_choropleth.html` | Residual deviation choropleth |
-| `poverty_by_political_lean.png` | Poverty slope divergence by political lean |
-| `viz_poverty_slope_choropleth.html` | Per-state poverty → criminalization slope |
-| `tx_mat_by_state.html` | MAT adoption rate ranked by state (PART 3b) |
-| `tx_cj_vs_index.html` | Court referrals vs. criminalization index scatter (PART 3b) |
-| `tx_facilities_choropleth.html` | Treatment centers per 100k choropleth (PART 3b) |
-| `tx_mat_vs_overdose.html` | MAT adoption vs. overdose death rate scatter (PART 3b) |
-| `tx_ownership_mix.html` | Public/nonprofit/for-profit facility ownership by state (PART 3c) |
-| `tx_supply_gap.png` | Bed supply vs. overdose need gap by state (PART 3c) |
-| `tx_capacity_utilization.html` | Average bed occupancy by state (PART 3c) |
-| `tx_forprofit_vs_medicaid.html` | For-profit share vs. Medicaid acceptance scatter (PART 3c) |
-| `eda_summary.txt` | EDA text summary |
-| `model_results.txt` | Model comparison metrics |
-
-## Troubleshooting
-
-**Out of memory during tuning:**
-- Set `RUN_TUNING = False`
-- Reduce `N_ESTIMATORS`
-
-**Training too slow:**
-- Set `N_ESTIMATORS = 100`
-- Set `RUN_TUNING = False`
-- Set `FEATURES_SET = "baseline"`
-
-**Poor R² (below 0.4):**
-- Enable `DROP_OUTLIERS = True`
-- Switch to `FEATURES_SET = "extended"`
-- Enable `LOG_TRANSFORM = True`
-- Run tuning with `RUN_TUNING = True`
-
-## Quick Experiment Loop
-
-```python
-# Example: Test multiple feature sets
-for fset in ["baseline", "extended"]:
-    print(f"\n{'='*60}")
-    print(f"Testing FEATURES_SET = '{fset}'")
-    print(f"{'='*60}")
-    # Set FEATURES_SET = fset and re-run feature engineering + modeling cells
-```
-
-Good luck with your experiments!
+**Author:** Branlyn Roberson · [LinkedIn](https://www.linkedin.com/in/branlynroberson/)
